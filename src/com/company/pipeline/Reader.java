@@ -2,11 +2,10 @@ package com.company.pipeline;
 import ru.spbstu.pipeline.*;
 
 import java.io.*;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.logging.Level;
+
+import static java.lang.Math.min;
 
 public class Reader implements ru.spbstu.pipeline.Reader {
     enum READER_CONFIG_GRAMMAR {
@@ -39,14 +38,17 @@ public class Reader implements ru.spbstu.pipeline.Reader {
     private String inputFileName;
     private int block_size;
     private final Logger logger;
-    
+
+    private final byte[] DONE = {-1};
     private byte[] output;
+    private byte[] partOfOutput;
     private Object returnObject;
-    private Consumer consumer;
+    private ArrayList<Consumer> consumers;
     private Status status;
 
     public Reader(String configName, Logger logger) {
         this.logger = logger;
+        consumers = new ArrayList<>();
         ERRORS errors;
         try{
              errors = parseReaderCfg(configName);
@@ -116,10 +118,10 @@ public class Reader implements ru.spbstu.pipeline.Reader {
     }
 
     @Override
-    public void run(Map<Consumer, Thread> map) {
+    public void run() {
         status = Status.OK;
         try {
-            loop(map);
+            loop();
         }
         catch (IOException e) {
             status = Status.READER_ERROR;
@@ -137,17 +139,17 @@ public class Reader implements ru.spbstu.pipeline.Reader {
         public Object get() {
             if (typeName.equals(char[].class.getCanonicalName())) {
                 try {
-                    returnObject = new String(output, "UTF-16BE").toCharArray();
+                    returnObject = new String(partOfOutput, "UTF-16BE").toCharArray();
                 } catch (UnsupportedEncodingException e) {
                     logger.log(e.getMessage());
                 }
             }
             else if (typeName.equals(byte[].class.getCanonicalName())) {
-                returnObject = output.clone();
+                returnObject = partOfOutput.clone();
             }
             else if (typeName.equals(String.class.getCanonicalName())) {
                 try {
-                    returnObject = new String(output, "UTF-16BE");
+                    returnObject = new String(partOfOutput, "UTF-16BE");
                 } catch (UnsupportedEncodingException e) {
                     logger.log(e.getMessage());
                 }
@@ -180,7 +182,7 @@ public class Reader implements ru.spbstu.pipeline.Reader {
 
     @Override
     public void addConsumer(Consumer consumer) {
-        this.consumer = consumer;
+        this.consumers.add(consumer);
     }
 
     @Override
@@ -188,11 +190,14 @@ public class Reader implements ru.spbstu.pipeline.Reader {
         addConsumer(consumers.get(0));
     }
 
-    private void loop(Map<Consumer, Thread> map) throws IOException {
-        int rc = 0;
+    private synchronized void loop() throws IOException {
+        int rc;
         do {
             byte[] buffer = new byte[block_size];
             rc = is.read(buffer);
+            if (rc <= 0){
+                break;
+            }
             if (rc < block_size && rc > 0){
                 output = new byte[rc];
                 System.arraycopy(buffer, 0, output, 0, rc);
@@ -200,13 +205,23 @@ public class Reader implements ru.spbstu.pipeline.Reader {
             else {
                 output = buffer;
             }
-            consumer.loadDataFrom(this);
-            if (consumer.status() != Status.OK){
-                status = Status.EXECUTOR_ERROR;
-                return;
+            int partSize = output.length/consumers.size();
+            partOfOutput = new byte[partSize];
+            int i = 0;
+            for (Consumer cur : consumers) {
+                partOfOutput = Arrays.copyOfRange(output, i*partSize, min((i + 1)*partSize, output.length));
+                i++;
+                cur.loadDataFrom(this);
+                if (cur.status() != Status.OK){
+                    status = Status.EXECUTOR_ERROR;
+                    return;
+                }
             }
-            consumer.run();
         }while(rc == block_size);
+        partOfOutput = DONE;
+        for (Consumer cur : consumers) {
+            cur.loadDataFrom(this);
+        }
     }
 
 

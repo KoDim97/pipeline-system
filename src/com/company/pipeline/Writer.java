@@ -3,10 +3,11 @@ package com.company.pipeline;
 import ru.spbstu.pipeline.*;
 
 import java.io.*;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.sql.Array;
+import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 
 public class Writer implements ru.spbstu.pipeline.Writer {
@@ -35,17 +36,27 @@ public class Writer implements ru.spbstu.pipeline.Writer {
     }
     private static final String GRAMMAR_SEPARATOR = "=";
 
+    private final byte[] DONE = {-1};
     private Map<Producer, Producer.DataAccessor> prod_access = new HashMap<>();
     private OutputStream os;
     private final Logger logger;
     private String outputFilename;
-    private Producer producer;
+    private ArrayList<Producer> producers;
+    private BlockingQueue<byte[]> inputQueue;
     private byte[] input;
     private int block_size;
     private Status status;
+    private AtomicInteger curThread;
+    private AtomicInteger handled;
+    private AtomicInteger ended;
 
     public Writer(String configName, Logger logger) {
         this.logger = logger;
+        inputQueue = new ArrayBlockingQueue<>(10, true);
+        curThread = new AtomicInteger(0);
+        handled = new AtomicInteger(0);
+        ended = new AtomicInteger(0);
+        producers = new ArrayList<>();
         ERRORS errors;
         try{
             errors = parseWriterCfg(configName);
@@ -122,22 +133,50 @@ public class Writer implements ru.spbstu.pipeline.Writer {
     @Override
     public long loadDataFrom(Producer prod) {
         Producer.DataAccessor accessor = prod_access.get(prod);
-        //long buffSize = accessor.size();
-        input = (byte[])accessor.get();
-        return input.length;
+        byte[] curData = (byte[])accessor.get();
+        if (Arrays.equals(curData, DONE)){
+            ended.incrementAndGet();
+        }else {
+            AtomicInteger ind = new AtomicInteger(producers.indexOf(prod));
+            while (!curThread.compareAndSet(ind.get(), ind.get() + 1)){
+                try{
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    logger.log("InterruptedException");
+                }
+            }
+            inputQueue.add(curData);
+        }
+        return curData.length;
     }
 
     @Override
     public void run() {
-        if (status != Status.OK) {
-            return;
-        }
-        try {
-            write();
-        }
-        catch (IOException e) {
-            logger.log(Level.SEVERE, msg("Write error"), e);
-        }
+        AtomicInteger numOfProducers = new AtomicInteger(producers.size());
+        do {
+            while (handled.get() < numOfProducers.get()){
+                try{
+                    if(inputQueue.isEmpty()){
+                        Thread.sleep(100);
+                    }else {
+                        input = inputQueue.take();
+                        if (status != Status.OK) {
+                            return;
+                        }
+                        try {
+                            write();
+                            handled.incrementAndGet();
+                        } catch (IOException e) {
+                            logger.log(Level.SEVERE, msg("Write error"), e);
+                        }
+                    }
+                }catch (InterruptedException e) {
+                    logger.log("Interrupted error");
+                }
+            }
+            curThread.set(0);
+            handled.set(0);
+        }while (ended.get() < numOfProducers.get());
     }
 
 
@@ -147,10 +186,10 @@ public class Writer implements ru.spbstu.pipeline.Writer {
         if (!available.contains(byte[].class.getCanonicalName())){
             status = Status.EXECUTOR_ERROR;
             logger.log("No byte[] output from producer " +
-                    producer.getClass().getCanonicalName());
+                    prod.getClass().getCanonicalName());
         }
         prod_access.put(prod, prod.getAccessor(byte[].class.getCanonicalName()));
-        producer = prod;
+        producers.add(prod);
     }
 
     @Override

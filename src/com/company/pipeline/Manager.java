@@ -172,21 +172,33 @@ public class Manager {
 
            }
         }
-        reader.addConsumer(exs.get(0));
-        exs.get(0).addProducer(reader);
-        exs.get(0).addConsumer(exs.get(1));
-        for (int i = 1; i < exs.size() - 1; i++) {
-            exs.get(i).addProducer(exs.get(i - 1));
-            exs.get(i).addConsumer(exs.get(i + 1));
+        if (exs.size() == 0){
+            reader.addConsumer(writer);
+            writer.addProducer(reader);
+        }else {
+            for (Executor curExs :
+                    exs) {
+                reader.addConsumer(curExs);
+                curExs.addProducer(reader);
+                curExs.addConsumer(writer);
+                writer.addProducer(curExs);
+            }
         }
-        exs.get(exs.size() - 1).addProducer(exs.get(exs.size() - 2));
-        exs.get(exs.size() - 1).addConsumer(writer);
-        writer.addProducer(exs.get(exs.size() - 1));
     }
-    public void Run(){
-        Map<Consumer, Thread> map = new HashMap<>();
-        reader.run();
+
+    public void Run() {
+        Thread readThread = new Thread(reader);
+        readThread.start();
+
+        for (Executor ex : exs) {
+            Thread th = new Thread(ex);
+            th.start();
+        }
+
+        Thread writeThread = new Thread(writer);
+        writeThread.start();
     }
+
     public ERRORS getErrors() {
         return errors;
     }

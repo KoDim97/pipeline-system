@@ -2,6 +2,8 @@ package com.company.myExecutor;
 
 import java.io.*;
 import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 
 import com.company.pipeline.Writer;
 import ru.spbstu.pipeline.*;
@@ -16,6 +18,8 @@ public class MyExecutorRLE implements ru.spbstu.pipeline.Executor {
     private Object returnObject;
     private byte[] output;
     private byte[] input;
+    private final byte[] DONE = {-1};
+    private BlockingQueue<byte[]> inputQueue;
     private static final String GRAMMAR_SEPARATOR = "=";
     private MODE curMode;
     ERRORS errors;
@@ -65,6 +69,7 @@ public class MyExecutorRLE implements ru.spbstu.pipeline.Executor {
 
     public MyExecutorRLE(String configName, ru.spbstu.pipeline.logging.Logger logger) throws IOException {
         this.logger = logger;
+        inputQueue = new ArrayBlockingQueue<>(10, true);
         errors = parseConf(configName);
         if(errors != ERRORS.NO_ERRORS) {
             logger.log(errors.getMessage());
@@ -183,28 +188,38 @@ public class MyExecutorRLE implements ru.spbstu.pipeline.Executor {
 
     @Override
     public void run() {
-        if (status != Status.OK){
-            return;
+        try{
+            input = null;
+            while (!(Arrays.equals((input = inputQueue.take()), DONE))){
+                if (input == null){
+                    Thread.sleep(100);
+                    continue;
+                }
+                if (status != Status.OK){
+                    return;
+                }
+                RLE rle = new RLE();
+                Process(rle);
+                if (consumer.loadDataFrom(this) != 0){
+                    this.status = consumer.status();
+                }else {
+                    status = Status.EXECUTOR_ERROR;
+                    return;
+                }
+            }
+            output = DONE;
+            consumer.loadDataFrom(this);
+        }catch (InterruptedException e) {
+            logger.log("Interrupted error");
         }
-        logger.log("MyExecutorRLE started");
-        RLE rle = new RLE();
-        Process(rle);
-        logger.log("MyExecutorRLE finished");
-        if (consumer.loadDataFrom(this) != 0){
-            consumer.run();
-        }else {
-            status = Status.EXECUTOR_ERROR;
-            return;
-        }
-        this.status = consumer.status();
     }
 
     @Override
     public long loadDataFrom(Producer prod){
         DataAccessor accessor = prod_access.get(prod);
-        //long buffSize = accessor.size();
-        input = (byte[])accessor.get();
-        return input.length;
+        byte[] newData = (byte[])accessor.get();
+        inputQueue.add(newData);
+        return newData.length;
     }
 
     @Override
@@ -224,7 +239,7 @@ public class MyExecutorRLE implements ru.spbstu.pipeline.Executor {
         if (!available.contains(byte[].class.getCanonicalName())){
             status = Status.EXECUTOR_ERROR;
             logger.log("No byte[] output from producer " +
-                    producer.getClass().getCanonicalName());
+                    prod.getClass().getCanonicalName());
         }
         prod_access.put(prod, prod.getAccessor(byte[].class.getCanonicalName()));
         producer = prod;
